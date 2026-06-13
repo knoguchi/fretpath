@@ -18,7 +18,7 @@ import "fingering_core.js" as Core
 
 MuseScore {
     id: plugin
-    version: "5.7"
+    version: "1.0.0"
     title: "FretPath"
     description: "Computes playable guitar fingering (string/fret/finger/position) with dynamic programming and writes a TAB staff."
     categoryCode: "composing-arranging-tools"
@@ -220,7 +220,7 @@ MuseScore {
     function diagnose() {
         var lines = [];
         function log(s) { lines.push(s); console.log("[FretPath] " + s); }
-        log("FretPath v5.7 / MuseScore " + (mscoreVersion !== undefined ? mscoreVersion : "?"));
+        log("FretPath v1.0.0 / MuseScore " + (mscoreVersion !== undefined ? mscoreVersion : "?"));
         if (!curScore) { log("no score is open"); return lines.join("\n"); }
         log("score: " + curScore.scoreName + " / staves " + curScore.nstaves);
         log(applyTuningFromScore());
@@ -590,7 +590,7 @@ MuseScore {
             TextEdit {
                 id: statusText
                 width: parent.width
-                text: "v5.7 - Run computes fingering and writes the TAB staff. First time only: add a tablature instrument (Instruments panel). Use Copy log to share results. Issues: github.com/knoguchi/fretpath"
+                text: "v1.0.0 - Run computes fingering and writes the TAB staff. First time only: add a tablature instrument (Instruments panel). Use Copy log to share results. Issues: github.com/knoguchi/fretpath"
                 wrapMode: TextEdit.Wrap
                 readOnly: true
                 selectByMouse: true
