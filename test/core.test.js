@@ -51,3 +51,11 @@ test('stringMarks: on a solved line', function () {
         assert.strictEqual(marks[i][0], fretted && changed, 'note ' + i);
     }
 });
+
+test('isPositionMark: Roman numerals the plugin writes, nothing else', function () {
+    assert.ok(core.isPositionMark('I'));
+    assert.ok(core.isPositionMark('XII'));
+    assert.ok(!core.isPositionMark(''));
+    assert.ok(!core.isPositionMark('XX'));
+    assert.ok(!core.isPositionMark('rit.'));
+});

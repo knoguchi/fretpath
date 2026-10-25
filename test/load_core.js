@@ -10,7 +10,7 @@ const src = fs
     .replace(/^\.pragma[^\n]*\n/m, '');
 
 module.exports = new Function(src + `
-return {solve: solve, stringMarks: stringMarks,
+return {solve: solve, stringMarks: stringMarks, isPositionMark: isPositionMark,
         STRING_MARKS_OFF: STRING_MARKS_OFF, STRING_MARKS_ALWAYS: STRING_MARKS_ALWAYS,
         STRING_MARKS_CHANGE: STRING_MARKS_CHANGE};
 `)();

@@ -52,24 +52,34 @@ The plugin dialog:
 
 ![FretPath dialog](docs/images/run2.png)
 
-- **Run** — computes the fingering for the current selection (or the whole
-  score if nothing is selected) and writes the TAB staff, overwriting
-  previous contents.
-- **Write to TAB staff** — the default output. The last staff in the part
-  is treated as the TAB target.
-- **Write left-hand finger numbers / positions (Roman numerals)** —
-  optional annotations on the source staff.
+The top line names what will be processed: the selection's first staff,
+or staff 1 when nothing is selected, and the TAB staff (the last staff).
+
+- **Run** — computes the fingering and writes it. Re-running replaces what
+  the plugin wrote before; your own annotations are kept.
+- **Clear** — removes the plugin's annotations from the selection (or the
+  whole staff).
+- **TAB staff** — copies the notes to the last staff and sets each note's
+  string and fret. Off: annotations only.
+- **Finger numbers / Positions (I, II, III...)** — optional annotations on
+  the source staff.
 - **String numbers** — *Off* (default), *Always* (every fretted note), or
   *When the string changes*: only the melody (the top note of each chord)
   is marked, where its string differs from the previous melody note's.
   Inner chord notes and open strings are never marked. Written in
   MuseScore's String Number style, so they are drawn circled and read back
   as constraints.
-- **Also write on notes with existing annotations** — overwrite manual
-  annotations; off by default so your edits are preserved.
-- **Diagnose** — prints collection and solver statistics without writing
-  anything to the score.
-- **Copy log** — copies the full report to the clipboard for bug reports.
+- **Color new marks blue** — plugin annotations are blue (#0065bf), or a
+  near-black #010101 when unchecked. Either way the plugin recognizes them
+  as its own: every annotation it writes is also recorded in a score meta
+  tag (`fretPath`). One you edit by hand is no longer the plugin's: it is
+  recolored black and honored as a constraint.
+- **Replace my own fingerings** — off by default: finger and string
+  numbers you wrote are kept and used as constraints. On: they are
+  replaced too.
+- **Copy** — copies the status text for bug reports (and saves it to a
+  file, since the clipboard does not take it on every platform). If no
+  fingering is found, the status includes a diagnosis to send along.
 
 ## How it works
 1. All four voices of the source staff are collected and merged into

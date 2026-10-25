@@ -23,13 +23,97 @@ MuseScore {
     description: "Computes playable guitar fingering (string/fret/finger/position) with dynamic programming and writes a TAB staff."
     categoryCode: "composing-arranging-tools"
     pluginType: "dialog"
-    width: 380
-    height: 420
+    width: 420
+    height: 480
 
     onRun: {
         if (!curScore) {
-            statusText.text = "No score is open";
+            statusBody = "No score is open";
+            return;
         }
+        refreshTarget();
+    }
+
+    // Result or error shown under the version line in the status area, so a
+    // copied status always carries the version (for issue reports).
+    property string statusBody: ""
+
+    // The staff being processed: the first staff of a range selection,
+    // otherwise staff 1, whole. The last staff is the TAB target (a
+    // selection on it is ignored, see collectEvents).
+    property string summary: ""
+    property bool hasTab: false
+
+    // "<part name>" for a staff index, or "Staff n".
+    function staffName(staffIdx) {
+        try {
+            var parts = curScore.parts;
+            for (var pi = 0; pi < parts.length; pi++) {
+                var part = parts[pi];
+                var base = Math.floor(part.startTrack / 4);
+                var nSt = Math.max(1, Math.round((part.endTrack - part.startTrack) / 4));
+                if (staffIdx >= base && staffIdx < base + nSt)
+                    return (staffIdx + 1) + ": "
+                        + ("" + (part.partName || part.longName || "Staff")).trim();
+            }
+        } catch (e) {}
+        return "Staff " + (staffIdx + 1);
+    }
+
+    // Re-read the selection (it may have changed while the dialog is open)
+    // for the line above the options.
+    function refreshTarget() {
+        if (!curScore) { summary = ""; return; }
+        var n = curScore.nstaves;
+        hasTab = n >= 2;
+        var c = curScore.newCursor();
+        c.rewind(Cursor.SELECTION_START);
+        var onSel = !!c.segment && !(hasTab && c.staffIdx === n - 1);
+        var src = onSel ? c.staffIdx : 0;
+        summary = (onSel ? "Selection: " : "Whole staff: ") + staffName(src)
+            + (hasTab ? " \u2192 TAB " + staffName(n - 1) : "");
+    }
+
+    // Measure start ticks, ascending, built once per run. Used only to turn
+    // ticks into bar numbers for the status window.
+    property var measureStarts: []
+
+    function buildMeasureStarts() {
+        measureStarts = [];
+        try {
+            for (var m = curScore.firstMeasure; m; m = m.nextMeasure)
+                measureStarts.push(m.firstSegment.tick);
+        } catch (e) {
+            measureStarts = [];
+        }
+    }
+
+    // 1-based bar number containing tick, or 0 when unavailable.
+    function measureNoAt(tick) {
+        var ms = measureStarts;
+        if (!ms || !ms.length) return 0;
+        var lo = 0, hi = ms.length - 1, ans = 0;
+        while (lo <= hi) {
+            var mid = Math.floor((lo + hi) / 2);
+            if (ms[mid] <= tick) { ans = mid; lo = mid + 1; }
+            else hi = mid - 1;
+        }
+        return ans + 1;
+    }
+
+    // Collapses a sorted list of bar numbers into "3-7, 11, 20-24".
+    function formatBarRanges(bars, maxRanges) {
+        if (!bars.length) return "";
+        var out = [], start = bars[0], prev = bars[0];
+        for (var i = 1; i <= bars.length; i++) {
+            var b = bars[i];
+            if (i < bars.length && (b === prev || b === prev + 1)) { prev = b; continue; }
+            out.push(start === prev ? "" + start : start + "-" + prev);
+            if (i < bars.length) { start = b; prev = b; }
+        }
+        if (maxRanges && out.length > maxRanges)
+            return out.slice(0, maxRanges).join(", ") + ", +" + (out.length - maxRanges) + " more";
+        return out.join(", ");
     }
 
     // String-number mode: Core.STRING_MARKS_OFF / _ALWAYS / _CHANGE
@@ -37,6 +121,111 @@ MuseScore {
 
     property var voiceCounts: [0, 0, 0, 0]
     property var voiceEvents: [[], [], [], []]
+    property int targetStaff: 0
+
+    // -- ownership of plugin-written annotations ----------
+    // Everything the plugin writes is recorded in a score meta tag
+    // ("fretPath": JSON {v: 1, items: [[tick, pitch, kind, text, staff],
+    // ...]}, kind "f"=finger, "s"=string, "p"=position mark, pitch -1 for
+    // staff text) and tinted with markerColor. On re-run, annotations
+    // matching their registry entry are removed and regenerated; a
+    // plugin-written text the user has edited no longer matches and is
+    // promoted to a user constraint. Marker-colored elements with no
+    // registry slot (registry lost or ticks shifted) fall back to
+    // plugin-owned. Annotations are written in autoColor (visible blue) or,
+    // when colorize is unchecked, stealthColor (near-black); both are
+    // recognized as plugin-owned. Promoted (user-edited) elements are
+    // recolored to plain black.
+    property string stealthColor: "#010101"
+    property string autoColor: "#0065bf"
+    property var pluginEls: []     // elements to remove on this run
+    property var promotedEls: []   // edited by user: recolor to black
+    property var registry: null
+
+    function loadRegistry() {
+        var reg = {items: [], consumed: [], byKey: {}, byKind: {}};
+        try {
+            var raw = curScore.metaTag("fretPath");
+            if (raw) reg.items = JSON.parse(raw).items || [];
+        } catch (e) { reg.items = []; }
+        for (var i = 0; i < reg.items.length; i++) {
+            var it = reg.items[i];
+            var key = it[4] + "|" + it[0] + "|" + it[1] + "|" + it[2] + "|" + it[3];
+            if (!reg.byKey[key]) reg.byKey[key] = [];
+            reg.byKey[key].push(i);
+            reg.byKind[it[4] + "|" + it[0] + "|" + it[1] + "|" + it[2]] = true;
+            reg.consumed.push(false);
+        }
+        return reg;
+    }
+
+    // Registry items not consumed this run (e.g. outside the selection)
+    // survive; consumed ones are replaced by newItems.
+    function saveRegistry(newItems) {
+        var items = [];
+        for (var q = 0; q < registry.items.length; q++)
+            if (!registry.consumed[q]) items.push(registry.items[q]);
+        items = items.concat(newItems);
+        curScore.setMetaTag("fretPath", JSON.stringify({v: 1, items: items}));
+        return items.length - newItems.length;
+    }
+
+    function isMarkerColored(el) {
+        var c = ("" + el.color).toLowerCase();   // "#rrggbb" or "#aarrggbb"
+        if (c.length < 7) return false;
+        var hex = c.substr(c.length - 6);
+        return hex === stealthColor.substr(1) || hex === autoColor.substr(1);
+    }
+
+    // "plugin" = remove and regenerate; "human" = honor as constraint.
+    function classifyAnnotation(reg, el, tick, pitch, kind, text) {
+        var idxs = reg.byKey[targetStaff + "|" + tick + "|" + pitch + "|" + kind + "|" + text];
+        if (idxs) {
+            for (var i = 0; i < idxs.length; i++)
+                if (!reg.consumed[idxs[i]]) { reg.consumed[idxs[i]] = true; return "plugin"; }
+        }
+        if (isMarkerColored(el)) {
+            // registered slot with different text = user edited it
+            if (reg.byKind[targetStaff + "|" + tick + "|" + pitch + "|" + kind]) {
+                promotedEls.push(el);
+                return "human";
+            }
+            return "plugin";
+        }
+        return "human";
+    }
+
+    // Recolors user-edited annotations black and removes the plugin's
+    // previous ones (collected by collectEvents). Runs before the TAB
+    // copy, so stale marks are not pasted onto the TAB staff.
+    function removePluginAnnotations() {
+        curScore.startCmd();
+        for (var pr = 0; pr < promotedEls.length; pr++) {
+            try { promotedEls[pr].color = "#000000"; } catch (e) {}
+        }
+        var removed = 0;
+        for (var r = 0; r < pluginEls.length; r++) {
+            try { removeElement(pluginEls[r]); removed++; } catch (e2) {}
+        }
+        curScore.endCmd();
+        return removed;
+    }
+
+    // -- clear plugin annotations ------------------------
+    // Removes all plugin-owned annotations in the selection (or the whole
+    // staff) and updates the registry. Manual annotations are untouched
+    // unless "Replace my own fingerings" is checked.
+    function clearAnnotations() {
+        if (!curScore) { statusBody = "No score is open"; return; }
+        collectEvents();   // classifies annotations into pluginEls/promotedEls
+        var removed = removePluginAnnotations();
+        curScore.startCmd();
+        var kept = saveRegistry([]);
+        curScore.endCmd();
+        statusBody = "Cleared " + removed + " plugin annotation"
+            + (removed === 1 ? "" : "s")
+            + (kept ? " (" + kept + " outside the selection kept)" : "");
+    }
     FileIO { id: logFile }
 
     property var trace: []
@@ -84,6 +273,10 @@ MuseScore {
         var byTick = {};
         voiceCounts = [0, 0, 0, 0];
         voiceEvents = [[], [], [], []];
+        targetStaff = staffIdx;
+        registry = loadRegistry();
+        pluginEls = [];
+        promotedEls = [];
         for (var voice = 0; voice < 4; voice++) {
             // IMPORTANT: set voice/staffIdx BEFORE rewind. In the reverse
             // order the walk ends immediately for voices that have no element
@@ -94,6 +287,19 @@ MuseScore {
             cursor.staffIdx = staffIdx;
             cursor.voice = voice;
             while (cursor.segment && (endTick < 0 || cursor.tick < endTick)) {
+                // plugin-written position marks live on segments
+                if (voice === 0 && cursor.segment.annotations) {
+                    var anns = cursor.segment.annotations;
+                    for (var an = 0; an < anns.length; an++) {
+                        var a = anns[an];
+                        if (!a || a.type !== Element.STAFF_TEXT) continue;
+                        if (a.track !== undefined && Math.floor(a.track / 4) !== staffIdx) continue;
+                        var ptxt = ("" + a.text).replace(/<[^>]*>/g, "").trim();
+                        if (!Core.isPositionMark(ptxt)) continue;
+                        if (classifyAnnotation(registry, a, cursor.tick, -1, "p", ptxt) === "plugin")
+                            pluginEls.push(a);
+                    }
+                }
                 var el = cursor.element;
                 if (el && el.type === Element.REST) {
                     voiceEvents[voice].push({tick: cursor.tick, rest: true,
@@ -121,8 +327,8 @@ MuseScore {
                         var note = el.notes[i];
                         if (note.tieBack) continue;          // excluded from fingering computation
                         voiceCounts[voice]++;
-                        var ann = readAnnotations(note);
                         var t = cursor.tick;
+                        var ann = readAnnotations(note, t);
                         if (!byTick[t]) byTick[t] = {};
                         var p = note.pitch;
                         if (byTick[t][p]) {                   // merge duplicates across voices
@@ -150,25 +356,36 @@ MuseScore {
     }
 
     // Read existing Fingering annotations. With style info we can tell
-    // string numbers from finger numbers; without it treat 0-4 as fingers
-    function readAnnotations(note) {
+    // string numbers from finger numbers; without it treat 0-4 as fingers.
+    // Plugin-owned annotations (see classifyAnnotation) are queued for
+    // removal instead and never become constraints.
+    function readAnnotations(note, tick) {
         var out = {string: null, finger: null};
         if (!note.elements) return out;
-        var plainDigits = [];
+        var plainDigits = [], humanEls = [];
         for (var i = 0; i < note.elements.length; i++) {
             var el = note.elements[i];
             if (el.type !== Element.FINGERING) continue;
             var txt = ("" + el.text).replace(/<[^>]*>/g, "").trim();
-            if (!/^[0-9]$/.test(txt)) continue;
-            var v = parseInt(txt);
-            var isString = false;
+            // "(3)": string number written without the String Number style
+            var paren = /^\([1-9]\)$/.test(txt);
+            if (!paren && !/^[0-9]$/.test(txt)) continue;
+            var isString = paren;
             try {
                 // MuseScore 4: subStyle (if available) distinguishes string numbers
                 if (el.subStyle !== undefined && typeof Tid !== "undefined" &&
                     el.subStyle === Tid.STRING_NUMBER)
                     isString = true;
             } catch (e) { /* tolerate API differences */ }
-            if (isString && v >= 1 && v <= 6) out.string = v;
+            if (classifyAnnotation(registry, el, tick, note.pitch,
+                                   isString ? "s" : "f", txt) === "plugin") {
+                pluginEls.push(el);
+                continue;
+            }
+            humanEls.push(el);
+            if (paren) continue;   // hand-written "(3)": no constraint
+            var v = parseInt(txt);
+            if (isString && v >= 1 && v <= Core.TUNING.length) out.string = v;
             else plainDigits.push(v);
         }
         // A single style-less digit is trusted as a finger number. Multiple
@@ -176,6 +393,13 @@ MuseScore {
         // misreading
         if (plainDigits.length === 1 && plainDigits[0] <= 4)
             out.finger = plainDigits[0];
+        // Replace mode: the user's own finger/string annotations are
+        // removed and regenerated too.
+        if (overwrite.checked && humanEls.length) {
+            for (var r = 0; r < humanEls.length; r++) pluginEls.push(humanEls[r]);
+            out.string = null;
+            out.finger = null;
+        }
         return out;
     }
 
@@ -223,7 +447,7 @@ MuseScore {
     function diagnose() {
         var lines = [];
         function log(s) { lines.push(s); console.log("[FretPath] " + s); }
-        log("FretPath v1.0.0 / MuseScore " + (mscoreVersion !== undefined ? mscoreVersion : "?"));
+        log("FretPath v" + plugin.version + " / MuseScore " + (mscoreVersion !== undefined ? mscoreVersion : "?"));
         if (!curScore) { log("no score is open"); return lines.join("\n"); }
         log("score: " + curScore.scoreName + " / staves " + curScore.nstaves);
         log(applyTuningFromScore());
@@ -439,44 +663,54 @@ MuseScore {
                 }
             }
         }
+        if (!fx.setFail && !missing.length)
+            return "TAB: " + fx.written + " notes written";
         return pre + steps.join("\n")
             + "\nString/fret overwrite: " + fx.written
             + (fx.setFail ? " / set failed " + fx.setFail : "")
-            + (missing.length
-               ? "\nVerify: MISSING " + missing.join(", ")
-               : "\nVerify: all notes of all voices present on TAB");
+            + (missing.length ? "\nVerify: MISSING " + missing.join(", ") : "");
     }
 
     // -- annotation writing ------------------------------
     function apply() {
-        if (!curScore) { statusText.text = "No score is open"; return; }
+        if (!curScore) { statusBody = "No score is open"; return; }
         trace = [];
         var tuningMsg = applyTuningFromScore();
         var events = collectEvents();
-        if (events.length === 0) { statusText.text = "No notes found"; return; }
+        if (events.length === 0) { statusBody = "No notes found"; return; }
         // note.pitch is the sounding pitch (verified on treble+8 scores)
         // events whose annotations cannot be satisfied (e.g. harmonics) are skipped
-        var skipped = [];
+        buildMeasureStarts();
+        var skippedBars = [];
         var solvable = [];
+        var noteCount = 0, solvedNotes = 0;
         for (var si = 0; si < events.length; si++) {
+            noteCount += events[si].pitches.length;
             if (Core.candidatesForEvent(events[si].pitches).length === 0)
-                skipped.push(events[si].tick);
-            else
+                skippedBars.push(measureNoAt(events[si].tick));
+            else {
                 solvable.push(events[si]);
+                solvedNotes += events[si].pitches.length;
+            }
         }
         if (solvable.length === 0) {
-            statusText.text = "No solvable events";
+            statusBody = "No solvable events";
             return;
         }
         var result = Core.solve(solvable);
         if (!result) {
-            statusText.text = "Viterbi found no solution. Please run Diagnose, then\n"
-                + "report the output at https://github.com/knoguchi/fretpath/issues";
+            statusBody = "Viterbi found no solution. Please copy this and report it at\n"
+                + "https://github.com/knoguchi/fretpath/issues\n\n" + diagnose();
             return;
         }
         events = solvable;
+        removePluginAnnotations();
+        var markerColor = colorize.checked ? autoColor : stealthColor;
+        var newItems = [];
         var tabMsg = "";
-        if (writeTabOpt.checked) try {
+        if (writeTabOpt.checked && !hasTab)
+            tabMsg = "\nTAB not written: no TAB staff";
+        else if (writeTabOpt.checked) try {
             var asg = {};
             for (var ri = 0; ri < result.length; ri++)
                 for (var rj = 0; rj < events[ri].pitches.length; rj++)
@@ -489,7 +723,8 @@ MuseScore {
         curScore.startCmd();
         var prevPos = null;
         var cursor = curScore.newCursor();
-        var nFing = 0, nSkipAnnotated = 0, nOpen = 0, nStr = 0;
+        cursor.staffIdx = targetStaff; cursor.voice = 0;
+        var nFing = 0, nSkipAnnotated = 0, nOpen = 0, nStr = 0, nPos = 0;
         var markString = Core.stringMarks(result, stringMarksMode);
         for (var i = 0; i < result.length; i++) {
             var st = result[i];
@@ -503,7 +738,10 @@ MuseScore {
                     else {
                         var fing = newElement(Element.FINGERING);
                         fing.text = "" + k;
+                        fing.color = markerColor;
                         noteRefs[0].add(fing);
+                        newItems.push([events[i].tick, events[i].pitches[j].midi, "f",
+                                       fing.text, targetStaff]);
                         nFing++;
                     }
                 }
@@ -521,7 +759,10 @@ MuseScore {
                     } catch (e3) {}
                     var stringNum = Core.TUNING.length - s;
                     sn.text = styled ? "" + stringNum : "(" + stringNum + ")";
+                    sn.color = markerColor;
                     noteRefs[0].add(sn);
+                    newItems.push([events[i].tick, events[i].pitches[j].midi, "s",
+                                   sn.text, targetStaff]);
                     nStr++;
                 }
             }
@@ -531,48 +772,69 @@ MuseScore {
                     cursor.rewindToTick(events[i].tick);
                     var stx = newElement(Element.STAFF_TEXT);
                     stx.text = Core.ROMAN[st.pos];
+                    stx.color = markerColor;
                     cursor.add(stx);
+                    newItems.push([events[i].tick, -1, "p", stx.text, targetStaff]);
                     prevPos = st.pos;
+                    nPos++;
                 }
             }
         }
         if (trace.length)
             tabMsg += "\n--- input trace (opening) ---\n" + trace.join("\n");
-        console.log("[FretPath] === result ===\n" + tabMsg);
 
+
+        saveRegistry(newItems);
         curScore.endCmd();
-        statusText.text = tuningMsg + "\n"
-            + "Done: " + events.length + " events processed" + tabMsg
-            + "\nFingers: wrote " + nFing
-            + " / skipped annotated " + nSkipAnnotated
-            + " / open strings (n/a) " + nOpen
-            + (stringMarksMode !== Core.STRING_MARKS_OFF ? " / strings wrote " + nStr : "")
-
-            + (skipped.length
-               ? "\nSkipped " + skipped.length
-                 + " events (tick " + skipped.join(", ")
-                 + ") - no fingering satisfies the annotations; possibly harmonics"
-               : "");
+        var head = skippedBars.length
+            ? "Partly done: " + solvedNotes + " of " + noteCount + " notes fingered, "
+            : "Done: " + noteCount + " notes, ";
+        statusBody = head + tuningMsg + "\n"
+            + (skippedBars.length ? "Not fingered in bars "
+                + formatBarRanges(skippedBars, 12)
+                + " (no string and fret fits the note and its annotations;"
+                + " out of range or a harmonic?)\n" : "")
+            + "Fingers " + nFing
+            + (stringMarksMode !== Core.STRING_MARKS_OFF ? ", strings " + nStr : "")
+            + (writePositions.checked ? ", positions " + nPos : "")
+            + tabMsg;
     }
 
     // -- UI ----------------------------------------------
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 14
-        spacing: 8
-        Label {
-            text: "Computes fingering for the selection (or the whole score) and writes it.\nExisting finger/string annotations are honored as constraints."
-            wrapMode: Text.WordWrap
+        spacing: 6
+        Text {
             Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font.bold: true
+            color: writeFingers.palette.windowText
+            text: plugin.summary
         }
-        CheckBox { id: writeTabOpt;    checked: true;  text: "Write to TAB staff (last staff is treated as TAB)" }
-        CheckBox { id: writeFingers;   checked: false; text: "Write left-hand finger numbers" }
+        Text {
+            visible: writeTabOpt.checked && !plugin.hasTab
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            color: "#d32f2f"
+            font.bold: true
+            text: "No TAB staff: add \"Classical Guitar (tablature)\" in Instruments (I)"
+        }
+        CheckBox {
+            id: writeTabOpt; checked: true
+            text: "TAB staff"
+            ToolTip.visible: hovered; ToolTip.delay: 400
+            ToolTip.text: "Copies the notes to the last staff and sets their string and fret"
+        }
+        CheckBox { id: writeFingers;   checked: false; text: "Finger numbers" }
+        CheckBox { id: writePositions; checked: false; text: "Positions (I, II, III...)" }
         RowLayout {
             Layout.fillWidth: true
-            Label {
+            Text {
                 text: "String numbers:"
                 Layout.alignment: Qt.AlignTop
                 topPadding: 10        // lines up with the first row of radios
+                color: writeFingers.palette.windowText
             }
             ButtonGroup { id: stringMarksGroup }
             Flow {
@@ -593,31 +855,45 @@ MuseScore {
                 }
             }
         }
-        CheckBox { id: writePositions; checked: false; text: "Write positions (Roman numerals)" }
-        CheckBox { id: overwrite;      checked: false; text: "Also write on notes with existing annotations" }
+        CheckBox { id: colorize;       checked: true;  text: "Color new marks blue" }
+        CheckBox {
+            id: overwrite; checked: false
+            text: "Replace my own fingerings"
+            ToolTip.visible: hovered; ToolTip.delay: 400
+            ToolTip.text: "Off: fingerings you wrote are kept and used as constraints"
+        }
         RowLayout {
             Button {
                 text: "Run"
                 onClicked: {
-                    statusText.text = "Running...";
+                    statusBody = "Running...";
+                    plugin.refreshTarget();
                     try { plugin.apply(); }
-                    catch (e) { statusText.text = "Exception while running: " + e + "\n" + (e.stack || "")
+                    catch (e) { statusBody = "Exception while running: " + e + "\n" + (e.stack || "")
                         + "\nPlease report: https://github.com/knoguchi/fretpath/issues"; }
                 }
             }
             Button {
-                text: "Diagnose"
+                text: "Clear"
                 onClicked: {
-                    try {
-                        statusText.text = plugin.diagnose();
-                    }
-                    catch (e) { statusText.text = "Exception in diagnostics: " + e + "\n" + (e.stack || "")
+                    plugin.refreshTarget();
+                    try { plugin.clearAnnotations(); }
+                    catch (e) { statusBody = "Exception while clearing: " + e + "\n" + (e.stack || "")
                         + "\nPlease report: https://github.com/knoguchi/fretpath/issues"; }
                 }
             }
             Button {
-                text: "Copy log"
-                onClicked: { statusText.selectAll(); statusText.copy(); statusText.deselect(); }
+                text: "Copy"
+                onClicked: {
+                    // Selecting by mouse does not copy in a plugin dialog on every platform.
+                    statusText.forceActiveFocus();
+                    statusText.selectAll();
+                    statusText.copy();
+                    // Fallback if the clipboard does not take it: save it to a file.
+                    var saved = plugin.dumpLog(statusText.text);
+                    if (saved.charAt(0) !== "(")
+                        statusBody = statusBody + "\n(copied; also saved to " + saved + ")";
+                }
             }
             Button { text: "Close"; onClicked: quit() }
         }
@@ -629,11 +905,11 @@ MuseScore {
             TextEdit {
                 id: statusText
                 width: parent.width
-                text: "v1.0.0 - Run computes fingering and writes the TAB staff. First time only: add a tablature instrument (Instruments panel). Use Copy log to share results. Issues: github.com/knoguchi/fretpath"
+                text: "v" + plugin.version + (plugin.statusBody ? "\n" + plugin.statusBody : "")
                 wrapMode: TextEdit.Wrap
                 readOnly: true
                 selectByMouse: true
-                color: "black"
+                color: writeFingers.palette.windowText
             }
         }
     }

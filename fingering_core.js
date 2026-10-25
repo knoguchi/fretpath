@@ -35,6 +35,11 @@ var W = {
 var ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII",
              "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"];
 
+// True for a position mark the plugin writes ("I" ... "XVI").
+function isPositionMark(txt) {
+    return txt !== "" && ROMAN.indexOf(txt) >= 0;
+}
+
 // -- candidate enumeration -------------------------------
 // note: {midi, string (1-6 or null), finger (0-4 or null)}
 function candidatesForNote(note) {
