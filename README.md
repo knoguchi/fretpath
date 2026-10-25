@@ -57,8 +57,14 @@ The plugin dialog:
   previous contents.
 - **Write to TAB staff** — the default output. The last staff in the part
   is treated as the TAB target.
-- **Write left-hand finger numbers / string numbers (1)–(6) / positions
-  (Roman numerals)** — optional annotations on the source staff.
+- **Write left-hand finger numbers / positions (Roman numerals)** —
+  optional annotations on the source staff.
+- **String numbers** — *Off* (default), *Always* (every fretted note), or
+  *When the string changes*: only the melody (the top note of each chord)
+  is marked, where its string differs from the previous melody note's.
+  Inner chord notes and open strings are never marked. Written in
+  MuseScore's String Number style, so they are drawn circled and read back
+  as constraints.
 - **Also write on notes with existing annotations** — overwrite manual
   annotations; off by default so your edits are preserved.
 - **Diagnose** — prints collection and solver statistics without writing

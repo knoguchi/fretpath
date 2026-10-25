@@ -32,6 +32,9 @@ MuseScore {
         }
     }
 
+    // String-number mode: Core.STRING_MARKS_OFF / _ALWAYS / _CHANGE
+    property int stringMarksMode: Core.STRING_MARKS_OFF
+
     property var voiceCounts: [0, 0, 0, 0]
     property var voiceEvents: [[], [], [], []]
     FileIO { id: logFile }
@@ -487,6 +490,7 @@ MuseScore {
         var prevPos = null;
         var cursor = curScore.newCursor();
         var nFing = 0, nSkipAnnotated = 0, nOpen = 0, nStr = 0;
+        var markString = Core.stringMarks(result, stringMarksMode);
         for (var i = 0; i < result.length; i++) {
             var st = result[i];
             for (var j = 0; j < events[i].pitches.length; j++) {
@@ -503,10 +507,20 @@ MuseScore {
                         nFing++;
                     }
                 }
-                if (writeStrings.checked && f > 0 &&
+                if (markString[i][j] &&
                     (events[i].pitches[j].string === null || overwrite.checked)) {
                     var sn = newElement(Element.FINGERING);
-                    sn.text = "(" + (Core.TUNING.length - s) + ")"; // string number, ASCII
+                    // String Number text style: MuseScore draws the circle,
+                    // and readAnnotations recognizes it as a string number.
+                    var styled = false;
+                    try {
+                        if (typeof Tid !== "undefined") {
+                            sn.subStyle = Tid.STRING_NUMBER;
+                            styled = true;
+                        }
+                    } catch (e3) {}
+                    var stringNum = Core.TUNING.length - s;
+                    sn.text = styled ? "" + stringNum : "(" + stringNum + ")";
                     noteRefs[0].add(sn);
                     nStr++;
                 }
@@ -532,7 +546,7 @@ MuseScore {
             + "\nFingers: wrote " + nFing
             + " / skipped annotated " + nSkipAnnotated
             + " / open strings (n/a) " + nOpen
-            + (writeStrings.checked ? " / strings wrote " + nStr : "")
+            + (stringMarksMode !== Core.STRING_MARKS_OFF ? " / strings wrote " + nStr : "")
 
             + (skipped.length
                ? "\nSkipped " + skipped.length
@@ -553,7 +567,32 @@ MuseScore {
         }
         CheckBox { id: writeTabOpt;    checked: true;  text: "Write to TAB staff (last staff is treated as TAB)" }
         CheckBox { id: writeFingers;   checked: false; text: "Write left-hand finger numbers" }
-        CheckBox { id: writeStrings;   checked: false; text: "Write string numbers (1)-(6)" }
+        RowLayout {
+            Layout.fillWidth: true
+            Label {
+                text: "String numbers:"
+                Layout.alignment: Qt.AlignTop
+                topPadding: 10        // lines up with the first row of radios
+            }
+            ButtonGroup { id: stringMarksGroup }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 4
+                Repeater {
+                    // index order = Core.STRING_MARKS_OFF / _ALWAYS / _CHANGE
+                    model: ["Off", "Always", "When the string changes"]
+                    RadioButton {
+                        ButtonGroup.group: stringMarksGroup
+                        text: modelData
+                        checked: plugin.stringMarksMode === index
+                        onClicked: plugin.stringMarksMode = index
+                        ToolTip.visible: hovered && index === Core.STRING_MARKS_CHANGE
+                        ToolTip.delay: 400
+                        ToolTip.text: "Melody only: the top note, where its string changes. Chord inner notes are not marked."
+                    }
+                }
+            }
+        }
         CheckBox { id: writePositions; checked: false; text: "Write positions (Roman numerals)" }
         CheckBox { id: overwrite;      checked: false; text: "Also write on notes with existing annotations" }
         RowLayout {

@@ -227,6 +227,34 @@ function solve(events) {
     return out;
 }
 
+// -- string numbers --------------------------------------
+// Display modes (dialog radio order).
+var STRING_MARKS_OFF = 0, STRING_MARKS_ALWAYS = 1, STRING_MARKS_CHANGE = 2;
+
+// Which notes carry a string number under `mode`: per event, one boolean
+// per note of the combo. Open strings are never marked (the TAB and the
+// "0" say it). ALWAYS marks every fretted note. CHANGE follows the melody,
+// the top note of each event (notes are sorted by descending pitch): it
+// is marked when its string differs from the previous top note's. Inner
+// chord notes are never marked; a chord shape implies its strings. An
+// open top note is not marked but still counts as the string played.
+function stringMarks(result, mode) {
+    var out = [], prev = null;
+    for (var i = 0; i < result.length; i++) {
+        var combo = result[i].combo, marks = [];
+        for (var j = 0; j < combo.length; j++) {
+            var fretted = combo[j][1] > 0;
+            if (mode === STRING_MARKS_ALWAYS) marks.push(fretted);
+            else if (mode === STRING_MARKS_CHANGE && j === 0)
+                marks.push(fretted && combo[0][0] !== prev);
+            else marks.push(false);
+        }
+        if (combo.length) prev = combo[0][0];
+        out.push(marks);
+    }
+    return out;
+}
+
 // -- finger assignment (barre-aware) ---------------------
 function barreValid(finger, fret, strings, combo) {
     var smin = Math.min.apply(null, strings);

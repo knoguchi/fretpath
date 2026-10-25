@@ -1,0 +1,9 @@
+{
+  "name": "fretpath",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MuseScore guitar fingering plugin - tests for the pure-JS core",
+  "scripts": {
+    "test": "node --test"
+  }
+}
