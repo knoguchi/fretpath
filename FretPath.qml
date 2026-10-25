@@ -582,8 +582,9 @@ MuseScore {
         steps.push("note entry: " + added + " notes");
     }
 
-    function fixupTab(tabStaff, asg) {
-        // overwrite string/fret + remove stems + hide rests (tie continuations carried)
+    function fixupTab(tabStaff, asg, color) {
+        // overwrite string/fret + remove stems + hide rests (tie continuations carried);
+        // the fret numbers take the marker color like every plugin annotation
         curScore.startCmd();
         var written = 0, setFail = 0;
         var last = {};
@@ -605,6 +606,7 @@ MuseScore {
                         try {
                             note.string = msStr;
                             note.fret = sf[1];
+                            note.color = color;
                             if (note.string === msStr && note.fret === sf[1]) written++;
                             else setFail++;
                         } catch (e) { setFail++; }
@@ -619,7 +621,7 @@ MuseScore {
         return {written: written, setFail: setFail};
     }
 
-    function writeTab(asg) {
+    function writeTab(asg, color) {
         var pre = ensureTabStaff();
         if (pre === null)
             return "No TAB staff. Open Instruments (I), search \"tablature\",\nadd \"Classical Guitar (tablature)\" and run again (first time only)";
@@ -631,7 +633,7 @@ MuseScore {
             steps.push("paste ineffective -> falling back to note entry");
             entryWrite(tabStaff, steps);
         }
-        var fx = fixupTab(tabStaff, asg);
+        var fx = fixupTab(tabStaff, asg, color);
 
         // self-verification
         var missing = [];
@@ -716,7 +718,7 @@ MuseScore {
                 for (var rj = 0; rj < events[ri].pitches.length; rj++)
                     asg[events[ri].tick + ":" + events[ri].pitches[rj].midi] =
                         [result[ri].combo[rj][0], result[ri].combo[rj][1]];
-            tabMsg = "\n" + writeTab(asg);
+            tabMsg = "\n" + writeTab(asg, markerColor);
         } catch (e) {
             tabMsg = "\nException while writing TAB: " + e + " " + (e.stack || "");
         }

@@ -60,7 +60,8 @@ or staff 1 when nothing is selected, and the TAB staff (the last staff).
 - **Clear** — removes the plugin's annotations from the selection (or the
   whole staff).
 - **TAB staff** — copies the notes to the last staff and sets each note's
-  string and fret. Off: annotations only.
+  string and fret, in the same color as the annotations. Off: annotations
+  only.
 - **Finger numbers / Positions (I, II, III...)** — optional annotations on
   the source staff.
 - **String numbers** — *Off* (default), *Always* (every fretted note), or

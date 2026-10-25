@@ -10,6 +10,8 @@
   were read back as the user's constraints, so they could never change.
   An annotation the user edits is recolored black and honored as a
   constraint. A new **Clear** button removes the plugin's annotations.
+- The TAB staff's fret numbers are written in the same blue (or near-black)
+  as the annotations, so everything the plugin wrote looks alike.
 - String numbers: Off / Always / When the string changes. The last one marks
   only the melody (the top note of each event) where its string changes;
   inner chord notes are never marked. String numbers are written in the
