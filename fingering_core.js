@@ -1,4 +1,4 @@
-// fingering_core.js - guitar fingering core (port of mscx2tab.py).
+// fingering_core.js - guitar/bass fingering core (port of mscx2tab.py).
 // Copyright (C) 2026 Kenji Noguchi <tokyo246@gmail.com> - GPL-3.0
 // Pure JavaScript, loadable from MuseScore QML and from Node.
 //
@@ -8,20 +8,39 @@
 //   - local: quadratic penalty past the body joint (12F), chord stretch,
 //     open-string bonus
 // String/finger annotations in the score are honored as constraints.
+// From Node, load it through index.js (this file stays a QML library).
 .pragma library
 
 var TUNING = [40, 45, 50, 55, 59, 64];   // default: standard E2 A2 D3 G3 B3 E4 (low to high)
 var MAX_FRET = 19;
+var MAX_POS = 16;                         // highest hand position (MAX_FRET - 3)
+var MAX_CHORD_SPAN = 4;
+var FINGER_TOL = 1;
+var BODY_FRET = 12;
+
+// Common tunings, MIDI pitches low to high
+var TUNINGS = {
+    guitar:  [40, 45, 50, 55, 59, 64],    // E2 A2 D3 G3 B3 E4
+    bass4:   [28, 33, 38, 43],            // E1 A1 D2 G2
+    bass5:   [23, 28, 33, 38, 43],        // B0 E1 A1 D2 G2
+    bass6:   [23, 28, 33, 38, 43, 48]     // B0 E1 A1 D2 G2 C3
+};
 
 // Inject the tuning read from the score (ascending, low to high)
 function setTuning(arr, maxFret) {
     if (arr && arr.length >= 3) TUNING = arr.slice();
     if (maxFret && maxFret > 0) MAX_FRET = maxFret;
+    MAX_POS = Math.max(1, MAX_FRET - 3);
 }
-var MAX_POS = 16;
-var MAX_CHORD_SPAN = 4;
-var FINGER_TOL = 1;
-var BODY_FRET = 12;
+
+// Optional: bodyFret (where the penalty for high frets starts), weights
+function setOptions(opts) {
+    if (!opts) return;
+    if (opts.bodyFret > 0) BODY_FRET = opts.bodyFret;
+    if (opts.weights)
+        for (var k in opts.weights)
+            if (k in W) W[k] = opts.weights[k];
+}
 
 var W = {
     W_MOVE: 3.0,        // per unit of position-shift distance
@@ -32,8 +51,13 @@ var W = {
     W_FINGER_DEV: 1.0   // deviation from an annotated finger's home fret
 };
 
-var ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII",
-             "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"];
+// Position as a Roman numeral (any fret count)
+function roman(n) {
+    var vals = [10, 9, 5, 4, 1], syms = ["X", "IX", "V", "IV", "I"], out = "";
+    for (var i = 0; i < vals.length; i++)
+        while (n >= vals[i]) { out += syms[i]; n -= vals[i]; }
+    return out;
+}
 
 // -- candidate enumeration -------------------------------
 // note: {midi, string (1-6 or null), finger (0-4 or null)}

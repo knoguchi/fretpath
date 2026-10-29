@@ -1,4 +1,4 @@
-// FretPath - automatic guitar fingering for MuseScore Studio 4.4+
+// FretPath - automatic guitar and bass fingering for MuseScore Studio 4.4+
 // Copyright (C) 2026 Kenji Noguchi <tokyo246@gmail.com>
 // License: GPL-3.0 (see LICENSE)
 // https://github.com/knoguchi/fretpath
@@ -13,14 +13,13 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import MuseScore 3.0
-import FileIO 3.0
 import "fingering_core.js" as Core
 
 MuseScore {
     id: plugin
-    version: "1.0.0"
+    version: "1.1.0"
     title: "FretPath"
-    description: "Computes playable guitar fingering (string/fret/finger/position) with dynamic programming and writes a TAB staff."
+    description: "Computes playable guitar or bass fingering (string/fret/finger/position) with dynamic programming and writes a TAB staff."
     categoryCode: "composing-arranging-tools"
     pluginType: "dialog"
     width: 380
@@ -34,50 +33,135 @@ MuseScore {
 
     property var voiceCounts: [0, 0, 0, 0]
     property var voiceEvents: [[], [], [], []]
-    FileIO { id: logFile }
 
-    property var trace: []
-    function dumpLog(text) {
-        // FileIO in 4.4 restricts writable locations; try likely-allowed places in order
-        var candidates = [];
-        try { candidates.push(logFile.tempPath() + "/FretPath_log.txt"); } catch (e) {}
-        try { candidates.push(logFile.homePath()
-              + "/Documents/MuseScore4/FretPath_log.txt"); } catch (e) {}
-        candidates.push(Qt.resolvedUrl("FretPath_log.txt")
-                        .toString().replace("file://", ""));
-        var errs = [];
-        for (var i = 0; i < candidates.length; i++) {
-            try {
-                logFile.source = candidates[i];
-                logFile.write(text);
-                if (logFile.read() && logFile.read().length > 0)
-                    return candidates[i];
-            } catch (e) { errs.push(candidates[i] + ": " + e); }
+    // -- parts and staves --------------------------------
+    // Parts know their track range; a staff has 4 tracks
+    function partOfStaff(staffIdx) {
+        for (var i = 0; i < curScore.parts.length; i++) {
+            var p = curScore.parts[i];
+            if (p.startTrack <= staffIdx * 4 && staffIdx * 4 < p.endTrack) return p;
         }
-        return "(all candidates failed: " + errs.join(" / ") + ")";
+        return null;
     }
-    function tlog(s) { trace.push(s); console.log("[FretPath] " + s); }
-    property int traceTickMax: 1920 * 2      // default: trace roughly the first 3 measures
 
-    // -- score scanning ----------------------------------
-    // returns: [{tick, pitches: [{midi, string, finger, refs: [Note,...]}]}]
-    function collectEvents() {
+    // A tablature instrument with no standard staff (e.g. "Bass Guitar (tablature)")
+    function isTabOnly(part) {
+        return !!part && part.hasTabStaff === true && part.hasPitchedStaff === false;
+    }
+
+    // Tuning of a part: {pitches (low to high), frets} or null for non-string instruments
+    function stringDataOf(part) {
+        try {
+            var sd = part.instrumentAtTick(0).stringData;
+            if (sd && sd.strings && sd.strings.length >= 3) {
+                var pitches = [];
+                for (var i = 0; i < sd.strings.length; i++)
+                    pitches.push(sd.strings[i].pitch);
+                pitches.sort(function (a, b) { return a - b; });
+                return {pitches: pitches, frets: sd.frets > 0 ? sd.frets : 19};
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // Some scores store a transposing instrument's string pitches as written
+    // (e.g. bass E2 A2 D3 G3 with an octave-down transposition) while
+    // note.pitch is sounding. Measure the offset from the frets a TAB staff
+    // already has: pitch - (open string + fret), the most common value wins.
+    function tuningOffset(staffIdx, pitches) {
+        var counts = {}, best = 0, bestN = 0;
+        var c = curScore.newCursor();
+        c.staffIdx = staffIdx; c.voice = 0;
+        c.rewind(Cursor.SCORE_START);
+        c.staffIdx = staffIdx; c.voice = 0;
+        while (c.segment) {
+            var el = c.element;
+            if (el && el.type === Element.CHORD)
+                for (var n = 0; n < el.notes.length; n++) {
+                    var nt = el.notes[n];
+                    if (nt.string < 0 || nt.string >= pitches.length || nt.fret < 0) continue;
+                    var off = nt.pitch - (pitches[pitches.length - 1 - nt.string] + nt.fret);
+                    counts[off] = (counts[off] || 0) + 1;
+                    if (counts[off] > bestN) { bestN = counts[off]; best = off; }
+                }
+            c.next();
+        }
+        return best;
+    }
+
+    // Without a selection: the first fretted instrument with standard notation,
+    // else the first TAB-only one (which is then updated in place)
+    function firstStringStaff() {
+        var tabOnly = -1;
+        for (var i = 0; i < curScore.parts.length; i++) {
+            var p = curScore.parts[i];
+            if (!stringDataOf(p)) continue;
+            if (!isTabOnly(p)) return p.startTrack / 4;
+            if (tabOnly < 0) tabOnly = p.startTrack / 4;
+        }
+        return tabOnly;
+    }
+
+    // TAB target: a TAB-only part, preferring the first one after the source
+    // part. If this MuseScore does not expose hasTabStaff, fall back to the
+    // last staff of the score if it is a fretted instrument (never drums)
+    // other than the source part.
+    function findTabStaff(srcPart) {
+        var parts = curScore.parts, after = -1, any = -1, seen = false;
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i];
+            if (p.startTrack === srcPart.startTrack) { seen = true; continue; }
+            if (!isTabOnly(p)) continue;
+            if (seen && after < 0) after = p.startTrack / 4;
+            if (any < 0) any = p.startTrack / 4;
+        }
+        if (after >= 0) return after;
+        if (any >= 0) return any;
+        var last = curScore.nstaves - 1, lastPart = partOfStaff(last);
+        if (parts.length && parts[0].hasTabStaff === undefined &&
+            lastPart.startTrack !== srcPart.startTrack && stringDataOf(lastPart))
+            return last;
+        return -1;
+    }
+
+    // Decide the source staff and range, and load its tuning into the core.
+    // A TAB-only source is updated in place instead of copied to another staff.
+    // Returns {src, endTick, part, inPlace, msg} or {error}
+    function setup() {
         var cursor = curScore.newCursor();
         cursor.rewind(Cursor.SELECTION_START);
-        var staffIdx = 0, endTick = -1;
-        // Ignore a selection that sits on the TAB staff (the last staff);
-        // a stale selection there would make us collect from the empty staff
-        if (cursor.segment && curScore.nstaves >= 2 &&
-            cursor.staffIdx === curScore.nstaves - 1) {
-            curScore.selection.clear();
-            cursor.rewind(Cursor.SELECTION_START);
-        }
+        var src, endTick = -1;
         if (cursor.segment) {                       // a selection exists
-            staffIdx = cursor.staffIdx;
+            src = cursor.staffIdx;
             var c2 = curScore.newCursor();
             c2.rewind(Cursor.SELECTION_END);
             endTick = c2.tick === 0 ? curScore.lastSegment.tick + 1 : c2.tick;
+        } else {
+            src = firstStringStaff();
+            if (src < 0)
+                return {error: "No guitar or bass staff found. Select the staff to finger."};
         }
+        var part = partOfStaff(src);
+        var sd = part ? stringDataOf(part) : null;
+        if (!sd)
+            return {error: "The selected staff is not a fretted instrument (no string data).\n"
+                         + "Select a guitar or bass staff."};
+        var inPlace = isTabOnly(part);
+        var offset = inPlace ? tuningOffset(src, sd.pitches) : 0;
+        var tuning = sd.pitches.map(function (p) { return p + offset; });
+        Core.setTuning(tuning, sd.frets);
+        var msg = "staff " + (src + 1) + " (" + part.longName + "), tuning: "
+                + tuning.map(noteName).join(" ") + ", " + sd.frets + " frets";
+        if (offset) msg += " (stored as " + sd.pitches.map(noteName).join(" ")
+                         + ", shifted " + offset + " to match the existing frets)";
+        if (inPlace) msg += "\nTAB-only staff: updating its string/fret in place";
+        return {src: src, endTick: endTick, part: part, inPlace: inPlace, msg: msg};
+    }
+
+    // -- score scanning ----------------------------------
+    // returns: [{tick, pitches: [{midi, string, finger, refs: [Note,...]}]}]
+    function collectEvents(staffIdx, endTick) {
+        var cursor = curScore.newCursor();
         var byTick = {};
         voiceCounts = [0, 0, 0, 0];
         voiceEvents = [[], [], [], []];
@@ -165,7 +249,7 @@ MuseScore {
                     el.subStyle === Tid.STRING_NUMBER)
                     isString = true;
             } catch (e) { /* tolerate API differences */ }
-            if (isString && v >= 1 && v <= 6) out.string = v;
+            if (isString && v >= 1 && v <= Core.TUNING.length) out.string = v;
             else plainDigits.push(v);
         }
         // A single style-less digit is trusted as a finger number. Multiple
@@ -176,59 +260,26 @@ MuseScore {
         return out;
     }
 
-    // Read the tuning from the score and inject it into the core. Returns a display string
-    function applyTuningFromScore() {
-        try {
-            var part = curScore.parts[0];           // part of the source staff
-            var inst = part.instrumentAtTick(0);
-            var sd = inst.stringData;
-            if (sd && sd.strings && sd.strings.length >= 3) {
-                var pitches = [];
-                for (var i = 0; i < sd.strings.length; i++)
-                    pitches.push(sd.strings[i].pitch);
-                pitches.sort(function (a, b) { return a - b; });   // low to high
-                Core.setTuning(pitches, sd.frets > 0 ? sd.frets : 19);
-                var names = pitches.map(noteName).join(" ");
-                var std = pitches.length === 6 && pitches.join(",") === "40,45,50,55,59,64";
-                return "tuning: " + names
-                     + (std ? "" : " (non-standard detected)");
-            }
-        } catch (e) {}
-        Core.setTuning([40, 45, 50, 55, 59, 64], 19);
-        return "tuning: standard (fallback)";
-    }
-
     function noteName(midi) {
         var names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
         return names[midi % 12] + (Math.floor(midi / 12) - 1);
-    }
-
-    function unplayableReport(events) {
-        var bad = [];
-        for (var i = 0; i < events.length; i++)
-            for (var j = 0; j < events[i].pitches.length; j++) {
-                var m = events[i].pitches[j].midi;
-                var lo = Core.TUNING[0];
-                var hi = Core.TUNING[Core.TUNING.length - 1] + 19;
-                if (m < lo || m > hi)
-                    bad.push(noteName(m) + " (tick " + events[i].tick + ")");
-            }
-        return bad;
     }
 
     // -- diagnostics -------------------------------------
     function diagnose() {
         var lines = [];
         function log(s) { lines.push(s); console.log("[FretPath] " + s); }
-        log("FretPath v1.0.0 / MuseScore " + (mscoreVersion !== undefined ? mscoreVersion : "?"));
+        log("FretPath v1.1.0 / MuseScore " + (mscoreVersion !== undefined ? mscoreVersion : "?"));
         if (!curScore) { log("no score is open"); return lines.join("\n"); }
         log("score: " + curScore.scoreName + " / staves " + curScore.nstaves);
-        log(applyTuningFromScore());
-        var sel = curScore.newCursor();
-        sel.rewind(Cursor.SELECTION_START);
-        log("selection: " + (sel.segment ? ("yes (staffIdx " + sel.staffIdx + ")") : "none -> whole staff 0"));
+        var ctx = setup();
+        if (ctx.error) { log(ctx.error); return lines.join("\n"); }
+        log("source: " + ctx.msg + (ctx.endTick < 0 ? " (whole staff)" : " (selection)"));
+        var tab = ctx.inPlace ? ctx.src : findTabStaff(ctx.part);
+        log("TAB target: " + (tab < 0 ? "none found" : "staff " + (tab + 1)
+            + " (" + partOfStaff(tab).longName + ")" + (ctx.inPlace ? ", in place" : "")));
         var events;
-        try { events = collectEvents(); }
+        try { events = collectEvents(ctx.src, ctx.endTick); }
         catch (e) { log("exception while collecting: " + e); return lines.join("\n"); }
         log("events: " + events.length);
         if (events.length === 0) return lines.join("\n");
@@ -243,7 +294,9 @@ MuseScore {
             }
         }
         log("pitch range: " + noteName(lo) + "(" + lo + ") - " + noteName(hi) + "(" + hi + ")"
-            + " / guitar sounding range is E2(40)-B5(83)");
+            + " / instrument range is " + noteName(Core.TUNING[0]) + "(" + Core.TUNING[0] + ")-"
+            + noteName(Core.TUNING[Core.TUNING.length - 1] + Core.MAX_FRET)
+            + "(" + (Core.TUNING[Core.TUNING.length - 1] + Core.MAX_FRET) + ")");
         log("max simultaneous notes: " + maxNotes + " / annotations: strings " + annStr + " fingers " + annFing);
         log("notes per voice: " + voiceCounts.join(" / "));
         var shown = 0;
@@ -277,18 +330,13 @@ MuseScore {
         return [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 12, 19][pitch % 12];
     }
 
-    function ensureTabStaff() {
-        if (curScore.nstaves >= 2) return "";
-        return null;
-    }
-
     // Two replication paths: (A) MuseScore's own copy & paste (faithful
     // incl. ties/tuplets where cmd works), or (B) note-by-note entry as a
     // proven fallback. Both are followed by the shared fixupTab pass.
 
-    function pasteCopy(tabStaff, steps) {
+    function pasteCopy(srcStaff, tabStaff, steps) {
         var lastTick = curScore.lastSegment.tick + 1;
-        var r1 = curScore.selection.selectRange(0, lastTick, 0, 1);
+        var r1 = curScore.selection.selectRange(0, lastTick, srcStaff, srcStaff + 1);
         steps.push("select source staff: " + r1);
         cmd("copy");
         var r2 = curScore.selection.selectRange(0, 1, tabStaff, tabStaff + 1);
@@ -355,8 +403,10 @@ MuseScore {
         steps.push("note entry: " + added + " notes");
     }
 
-    function fixupTab(tabStaff, asg) {
-        // overwrite string/fret + remove stems + hide rests (tie continuations carried)
+    function fixupTab(tabStaff, asg, inPlace) {
+        // overwrite string/fret (tie continuations carried). On a freshly
+        // copied staff also remove stems and hide rests; in place, touch
+        // nothing but the solved notes and their tie continuations
         curScore.startCmd();
         var written = 0, setFail = 0;
         var last = {};
@@ -368,11 +418,12 @@ MuseScore {
             while (c.segment) {
                 var el = c.element;
                 if (el && el.type === Element.CHORD) {
-                    try { el.noStem = true; } catch (e9) {}
+                    if (!inPlace) try { el.noStem = true; } catch (e9) {}
                     for (var n = 0; n < el.notes.length; n++) {
                         var note = el.notes[n];
-                        var sf = asg[c.tick + ":" + note.pitch] || last[note.pitch];
-                        if (!sf) { setFail++; continue; }
+                        var sf = asg[c.tick + ":" + note.pitch];
+                        if (!sf && (!inPlace || note.tieBack)) sf = last[note.pitch];
+                        if (!sf) { if (!inPlace) setFail++; continue; }
                         last[note.pitch] = sf;
                         var msStr = Core.TUNING.length - 1 - sf[0];
                         try {
@@ -382,7 +433,7 @@ MuseScore {
                             else setFail++;
                         } catch (e) { setFail++; }
                     }
-                } else if (el && el.type === Element.REST) {
+                } else if (!inPlace && el && el.type === Element.REST) {
                     try { el.visible = false; } catch (e3) {}
                 }
                 c.next();
@@ -392,19 +443,35 @@ MuseScore {
         return {written: written, setFail: setFail};
     }
 
-    function writeTab(asg) {
-        var pre = ensureTabStaff();
-        if (pre === null)
-            return "No TAB staff. Open Instruments (I), search \"tablature\",\nadd \"Classical Guitar (tablature)\" and run again (first time only)";
-        var tabStaff = curScore.nstaves - 1;
+    function writeTab(asg, ctx) {
+        if (ctx.inPlace) {
+            var fxi = fixupTab(ctx.src, asg, true);
+            return "Updated in place: " + fxi.written + " notes"
+                + (fxi.setFail ? " / set failed " + fxi.setFail : "");
+        }
+        var tabStaff = findTabStaff(ctx.part);
+        if (tabStaff < 0)
+            return "No TAB staff. Open Instruments (I), search \"tablature\", add the\n"
+                 + "matching tablature instrument (e.g. \"Bass Guitar (tablature)\")\n"
+                 + "and run again (first time only)";
+        var tabPart = partOfStaff(tabStaff);
+        var tabSd = stringDataOf(tabPart);
+        if (!tabSd || tabSd.pitches.length !== Core.TUNING.length)
+            return "TAB staff " + (tabStaff + 1) + " (" + tabPart.longName + ") has "
+                 + (tabSd ? tabSd.pitches.length : "no") + " strings but the source has "
+                 + Core.TUNING.length + ". Add a tablature instrument with the same string count.";
+        var pre = "TAB target: staff " + (tabStaff + 1) + " (" + tabPart.longName + ")\n";
+        if (tabSd.pitches.join(",") !== Core.TUNING.join(","))
+            pre += "Warning: TAB tuning " + tabSd.pitches.map(noteName).join(" ")
+                 + " differs from the source tuning\n";
         var steps = [];
         var ok = false;
-        try { ok = pasteCopy(tabStaff, steps); } catch (e) { steps.push("paste exception: " + e); }
+        try { ok = pasteCopy(ctx.src, tabStaff, steps); } catch (e) { steps.push("paste exception: " + e); }
         if (!ok) {
             steps.push("paste ineffective -> falling back to note entry");
             entryWrite(tabStaff, steps);
         }
-        var fx = fixupTab(tabStaff, asg);
+        var fx = fixupTab(tabStaff, asg, false);
 
         // self-verification
         var missing = [];
@@ -447,9 +514,10 @@ MuseScore {
     // -- annotation writing ------------------------------
     function apply() {
         if (!curScore) { statusText.text = "No score is open"; return; }
-        trace = [];
-        var tuningMsg = applyTuningFromScore();
-        var events = collectEvents();
+        var ctx = setup();
+        if (ctx.error) { statusText.text = ctx.error; return; }
+        var tuningMsg = ctx.msg;
+        var events = collectEvents(ctx.src, ctx.endTick);
         if (events.length === 0) { statusText.text = "No notes found"; return; }
         // note.pitch is the sounding pitch (verified on treble+8 scores)
         // events whose annotations cannot be satisfied (e.g. harmonics) are skipped
@@ -479,7 +547,7 @@ MuseScore {
                 for (var rj = 0; rj < events[ri].pitches.length; rj++)
                     asg[events[ri].tick + ":" + events[ri].pitches[rj].midi] =
                         [result[ri].combo[rj][0], result[ri].combo[rj][1]];
-            tabMsg = "\n" + writeTab(asg);
+            tabMsg = "\n" + writeTab(asg, ctx);
         } catch (e) {
             tabMsg = "\nException while writing TAB: " + e + " " + (e.stack || "");
         }
@@ -516,14 +584,12 @@ MuseScore {
                 if (fretted) {
                     cursor.rewindToTick(events[i].tick);
                     var stx = newElement(Element.STAFF_TEXT);
-                    stx.text = Core.ROMAN[st.pos];
+                    stx.text = Core.roman(st.pos);
                     cursor.add(stx);
                     prevPos = st.pos;
                 }
             }
         }
-        if (trace.length)
-            tabMsg += "\n--- input trace (opening) ---\n" + trace.join("\n");
         console.log("[FretPath] === result ===\n" + tabMsg);
 
         curScore.endCmd();
@@ -551,9 +617,9 @@ MuseScore {
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }
-        CheckBox { id: writeTabOpt;    checked: true;  text: "Write to TAB staff (last staff is treated as TAB)" }
+        CheckBox { id: writeTabOpt;    checked: true;  text: "Write to TAB staff (a tablature instrument in the score)" }
         CheckBox { id: writeFingers;   checked: false; text: "Write left-hand finger numbers" }
-        CheckBox { id: writeStrings;   checked: false; text: "Write string numbers (1)-(6)" }
+        CheckBox { id: writeStrings;   checked: false; text: "Write string numbers, e.g. (1)" }
         CheckBox { id: writePositions; checked: false; text: "Write positions (Roman numerals)" }
         CheckBox { id: overwrite;      checked: false; text: "Also write on notes with existing annotations" }
         RowLayout {
@@ -590,7 +656,7 @@ MuseScore {
             TextEdit {
                 id: statusText
                 width: parent.width
-                text: "v1.0.0 - Run computes fingering and writes the TAB staff. First time only: add a tablature instrument (Instruments panel). Use Copy log to share results. Issues: github.com/knoguchi/fretpath"
+                text: "v1.1.0 - Select the guitar or bass staff, then Run to compute fingering and write the TAB staff. First time only: add a matching tablature instrument (Instruments panel). Use Copy log to share results. Issues: github.com/knoguchi/fretpath"
                 wrapMode: TextEdit.Wrap
                 readOnly: true
                 selectByMouse: true
