@@ -1,6 +1,7 @@
 # FretPath
 
-Playable guitar fingering for MuseScore Studio 4.4+.
+Playable guitar and bass fingering for MuseScore Studio 4.4+, with a Node API
+for using the solver outside MuseScore.
 
 Repository: https://github.com/knoguchi/fretpath
 Bug reports and feature requests: https://github.com/knoguchi/fretpath/issues
@@ -38,9 +39,26 @@ actually play it.
 ## Setup
 1. Copy this folder to Documents/MuseScore4/Plugins and restart MuseScore.
 2. Enable the plugin in Home > Plugins.
-3. First time only: open the Instruments panel (I), search "tablature",
-   and add "Classical Guitar (tablature)". The plugin treats the last
-   staff as the TAB target.
+3. If your part is in standard notation, first time only: open the
+   Instruments panel (I), search "tablature", and add the matching
+   tablature instrument - e.g. "Classical Guitar (tablature)" or "Bass
+   Guitar (tablature)" - with the same number of strings. If your part is
+   already a tablature-only instrument, skip this step.
+
+The source is the staff you select (or, with nothing selected, the first
+guitar/bass in the score, preferring standard notation), and its tuning
+comes from that staff's instrument. Drums and other non-fretted
+instruments are ignored.
+
+- **Source is a tablature-only instrument** (e.g. a bass TAB with no
+  notation): its strings and frets are re-fingered in place. Nothing else
+  changes - stems, rests, and bars outside the selection stay as they are.
+- **Source is standard notation**: the notes are copied to the first
+  tablature-only instrument after it, so a score can hold guitar, bass and
+  their TAB staves side by side. The plugin refuses to write when that TAB
+  instrument has a different string count.
+
+An in-place update is a single undo step (Ctrl+Z).
 
 ## Usage
 
@@ -55,9 +73,9 @@ The plugin dialog:
 - **Run** — computes the fingering for the current selection (or the whole
   score if nothing is selected) and writes the TAB staff, overwriting
   previous contents.
-- **Write to TAB staff** — the default output. The last staff in the part
-  is treated as the TAB target.
-- **Write left-hand finger numbers / string numbers (1)–(6) / positions
+- **Write to TAB staff** — the default output, written to the tablature
+  instrument described above.
+- **Write left-hand finger numbers / string numbers / positions
   (Roman numerals)** — optional annotations on the source staff.
 - **Also write on notes with existing annotations** — overwrite manual
   annotations; off by default so your edits are preserved.
@@ -85,7 +103,33 @@ The plugin dialog:
   copies only the line count from the instrument template).
 - Chords whose annotations cannot be satisfied (e.g. natural harmonics)
   are skipped and reported.
+- Grace notes are not fingered; on the TAB they reuse the last string/fret
+  used for that pitch.
+- The finger model is guitar-style (one finger per fret over four frets).
+  For bass this only affects the finger numbers, not the TAB.
 - Requires MuseScore Studio 4.4 or later.
+
+## Node API
+`fingering_core.js` is shared with the plugin; `index.js` loads it for Node
+(18+), giving each instance its own tuning.
+
+```js
+const { createFretPath, fingerLine, TUNINGS } = require("./index.js");
+
+// Pitches are MIDI numbers; an inner array is a chord.
+fingerLine([29, 36, 41, 36], { tuning: TUNINGS.bass4, maxFret: 20 });
+// -> [{position: 1, notes: [{midi: 29, string: 4, fret: 1, finger: 1}]}, ...]
+//    string 1 is the highest string; null if any note is unplayable.
+
+// Lower level: the same solver the plugin uses, with constraints.
+const fp = createFretPath({ tuning: TUNINGS.bass5, maxFret: 24, bodyFret: 16,
+                            weights: { W_MOVE: 2.0 } });
+fp.solve([{ pitches: [{ midi: 33, string: 4, finger: null }] }]);
+// -> [{combo: [[stringIdx, fret]], pos, fingers, barres}] (stringIdx 0 = lowest)
+```
+
+Tunings: `TUNINGS.guitar`, `bass4`, `bass5`, `bass6`. Run the tests with
+`npm test`.
 
 ## License
 GPL-3.0. Copyright (C) 2026 Kenji Noguchi <tokyo246@gmail.com>.
